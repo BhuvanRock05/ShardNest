@@ -8,6 +8,8 @@ import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.Optional;
+
 @Service
 public class UserService {
 
@@ -24,5 +26,10 @@ public class UserService {
         User savedUser = userRepository.save(user);
 
         return modelMapper.map(savedUser, UserResponse.class);
+    }
+
+    public UserResponse getUserById(Long userId) {
+        Optional<User> userOptional = userRepository.findById(userId);
+        return modelMapper.map(userOptional, UserResponse.class);
     }
 }
