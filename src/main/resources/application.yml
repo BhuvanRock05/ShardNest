@@ -3,14 +3,27 @@ spring:
     name: shardNest
 
   datasource:
-    url: jdbc:mysql://localhost:3306/userdb1
-    username: root
-    password: root@123
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    shard1:
+      jdbc-url: jdbc:mysql://localhost:3306/userdb1
+      username: root
+      password: root@123
+      driver-class-name: com.mysql.cj.jdbc.Driver
+
+    shard2:
+      jdbc-url: jdbc:mysql://localhost:3306/userdb2
+      username: root
+      password: root@123
+      driver-class-name: com.mysql.cj.jdbc.Driver
+
+    shard3:
+      jdbc-url: jdbc:mysql://localhost:3306/userdb3
+      username: root
+      password: root@123
+      driver-class-name: com.mysql.cj.jdbc.Driver
 
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
     show-sql: true
     properties:
       hibernate:
