@@ -7,7 +7,6 @@ import com.shardNest.dto.UserResponse;
 import com.shardNest.model.User;
 import com.shardNest.repository.UserRepository;
 import com.shardNest.shard.Shard;
-import com.shardNest.shard.ShardOperationService;
 import com.shardNest.shard.ShardRouter;
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,10 +17,14 @@ import java.util.Optional;
 @Service
 public class UserService {
 
-    @Autowired private ModelMapper modelMapper;
-    @Autowired private UserRepository userRepository;
-    @Autowired private ShardRouter router;
-    @Autowired private ShardOperationService shardOp;
+    @Autowired
+    private ModelMapper modelMapper;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private ShardRouter router;
 
     public UserResponse addUser(UserRequest userRequest) {
         User user = modelMapper.map(userRequest, User.class);
@@ -40,16 +43,24 @@ public class UserService {
         }
     }
 
+    /**
+     * Read with fallback — tries primary shard, then all other shards.
+     * Safe during migration.
+     */
     public UserResponse getUserById(String userId) {
         Shard primary = router.getShard(userId);
-        UserResponse r = readFromShard(primary, userId);
-        if (r != null) return r;
 
+        // 1. Try primary shard
+        UserResponse response = readFromShard(primary, userId);
+        if (response != null) return response;
+
+        // 2. Fallback: try all other shards (during migration, data may not have moved yet)
         for (Shard shard : router.getAllShards()) {
             if (shard.getShardId().equals(primary.getShardId())) continue;
-            r = readFromShard(shard, userId);
-            if (r != null) return r;
+            response = readFromShard(shard, userId);
+            if (response != null) return response;
         }
+
         return null;
     }
 
@@ -65,14 +76,21 @@ public class UserService {
         }
     }
 
+    /**
+     * Delete with fallback — find where the user actually lives, then delete.
+     */
     public boolean deleteUserById(String userId) {
         Shard primary = router.getShard(userId);
+
+        // 1. Try primary
         if (deleteFromShard(primary, userId)) return true;
 
+        // 2. Fallback: try other shards
         for (Shard shard : router.getAllShards()) {
             if (shard.getShardId().equals(primary.getShardId())) continue;
             if (deleteFromShard(shard, userId)) return true;
         }
+
         return false;
     }
 

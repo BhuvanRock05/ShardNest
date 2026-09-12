@@ -1,9 +1,13 @@
 package com.shardNest.shard;
 
+import com.shardNest.config.ShardContext;
 import com.shardNest.model.Address;
 import com.shardNest.model.User;
+import com.shardNest.repository.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -16,12 +20,12 @@ public class ShardManager {
     private static final int PAGE_SIZE = 500;
 
     private final ConsistentHashRouter router;
-    private final ShardOperationService shardOp;
+    private final UserRepository userRepository;
     private final AtomicBoolean rebalancing = new AtomicBoolean(false);
 
-    public ShardManager(ConsistentHashRouter router, ShardOperationService shardOp) {
+    public ShardManager(ConsistentHashRouter router, UserRepository userRepository) {
         this.router = router;
-        this.shardOp = shardOp;
+        this.userRepository = userRepository;
     }
 
     // ═══════════════════════════════════════════════
@@ -45,22 +49,28 @@ public class ShardManager {
 
     private long rebalanceAfterAdd(Shard newShard) {
         long totalMoved = 0;
+
+        // Get all shards EXCEPT the new one
         List<Shard> sources = router.getAllShards().stream()
                 .filter(s -> !s.getShardId().equals(newShard.getShardId()))
                 .toList();
+
         for (Shard source : sources) {
             totalMoved += moveKeysTargeting(source, newShard);
         }
         return totalMoved;
     }
 
+    /**
+     * Scan `source`, move any user whose new ring target is `target`.
+     */
     private long moveKeysTargeting(Shard source, Shard target) {
         long scanned = 0;
         long moved = 0;
         String lastId = null;
 
         while (true) {
-            List<User> page = shardOp.readPageFromShard(source.getShardId(), lastId, PAGE_SIZE);
+            List<User> page = readPage(source, lastId);
             if (page.isEmpty()) break;
 
             for (User user : page) {
@@ -72,9 +82,12 @@ public class ShardManager {
                 }
             }
             lastId = page.get(page.size() - 1).getUserId();
+
+            if (scanned % 1000 == 0) {
+                log.info("  {} → {}: scanned={}, moved={}", source.getShardId(), target.getShardId(), scanned, moved);
+            }
         }
-        log.info("  {} → {}: DONE. scanned={}, moved={}",
-                source.getShardId(), target.getShardId(), scanned, moved);
+        log.info("  {} → {}: DONE. scanned={}, moved={}", source.getShardId(), target.getShardId(), scanned, moved);
         return moved;
     }
 
@@ -85,8 +98,13 @@ public class ShardManager {
         acquireLock();
         try {
             log.info("═══ Removing shard {} from ring ═══", shard.getShardId());
+
+            // 1. Remove from ring FIRST so new writes/reads don't route here
             router.removeShard(shard);
+
+            // 2. Drain all data off the shard
             long moved = drainShard(shard);
+
             log.info("═══ Done. Moved {} users off {} ═══", moved, shard.getShardId());
             return new ShardRemoveResult(shard, moved);
         } finally {
@@ -100,38 +118,72 @@ public class ShardManager {
         String lastId = null;
 
         while (true) {
-            List<User> page = shardOp.readPageFromShard(source.getShardId(), lastId, PAGE_SIZE);
+            List<User> page = readPage(source, lastId);
             if (page.isEmpty()) break;
 
             for (User user : page) {
                 scanned++;
+                // Ring no longer contains `source`, so this returns the new target
                 Shard target = router.getShard(user.getUserId());
                 moveUser(user, source, target);
                 moved++;
             }
             lastId = page.get(page.size() - 1).getUserId();
+
+            if (scanned % 1000 == 0) {
+                log.info("  Draining {}: scanned={}, moved={}", source.getShardId(), scanned, moved);
+            }
         }
-        log.info("  Draining {}: DONE. scanned={}, moved={}",
-                source.getShardId(), scanned, moved);
+        log.info("  Draining {}: DONE. scanned={}, moved={}", source.getShardId(), scanned, moved);
         return moved;
     }
 
     // ═══════════════════════════════════════════════
-    // MOVE ONE USER
+    // HELPERS
     // ═══════════════════════════════════════════════
+    private List<User> readPage(Shard shard, String lastId) {
+        ShardContext.setShard(shard.getShardId());
+        try {
+            if (lastId == null) {
+                return userRepository.findAll(
+                        PageRequest.of(0, PAGE_SIZE, Sort.by("userId"))
+                ).getContent();
+            }
+            return userRepository.findNextPage(lastId, PageRequest.of(0, PAGE_SIZE));
+        } finally {
+            ShardContext.clear();
+        }
+    }
+
     private void moveUser(User user, Shard from, Shard to) {
-        User copy = copyForTransfer(user);
 
-        // 1. INSERT to target — uses fresh transaction + fresh EntityManager
-        shardOp.saveToShard(to.getShardId(), copy);
+        User copyUser = copyForTransfer(user);
 
-        // 2. Verify
-        if (!shardOp.existsInShard(to.getShardId(), copy.getUserId())) {
-            throw new IllegalStateException("Verify failed for " + copy.getUserId());
+        // 1. Write to target
+        ShardContext.setShard(to.getShardId());
+        try {
+            userRepository.saveAndFlush(copyUser);
+        } finally {
+            ShardContext.clear();
+        }
+
+        // 2. Verify write
+        ShardContext.setShard(to.getShardId());
+        try {
+            if (!userRepository.existsById(copyUser.getUserId())) {
+                throw new IllegalStateException("Verify failed for " + copyUser.getUserId());
+            }
+        } finally {
+            ShardContext.clear();
         }
 
         // 3. Delete from source
-        shardOp.deleteFromShard(from.getShardId(), copy.getUserId());
+        ShardContext.setShard(from.getShardId());
+        try {
+            userRepository.deleteById(user.getUserId());
+        } finally {
+            ShardContext.clear();
+        }
     }
 
     private User copyForTransfer(User source) {
@@ -157,6 +209,7 @@ public class ShardManager {
         return copy;
     }
 
+
     private void acquireLock() {
         if (!rebalancing.compareAndSet(false, true)) {
             throw new IllegalStateException("Another rebalance is already in progress");
@@ -171,6 +224,9 @@ public class ShardManager {
         return rebalancing.get();
     }
 
+    // ═══════════════════════════════════════════════
+    // RESULT TYPES
+    // ═══════════════════════════════════════════════
     public record ShardAddResult(Shard shard, long moved) {}
     public record ShardRemoveResult(Shard shard, long moved) {}
 }
