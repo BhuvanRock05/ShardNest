@@ -3,12 +3,14 @@ package com.shardNest.shard;
 import com.google.common.hash.Hashing;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 
 public class HashRing {
 
-    private final SortedMap<Integer, Shard> ring = new TreeMap<>();
+    private final SortedMap<Integer, Shard> ring = new ConcurrentSkipListMap<>();
 
     public void addShard(Shard shard, int vnodeCount) {
         for (int i = 0; i < vnodeCount; i++) {
@@ -67,5 +69,11 @@ public class HashRing {
 
     public int size() {
         return ring.size();
+    }
+
+    public List<Shard> getDistinctShards() {
+        return ring.values().stream()
+                .distinct()
+                .toList();
     }
 }

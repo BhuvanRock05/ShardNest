@@ -7,6 +7,7 @@ import com.shardNest.dto.UserResponse;
 import com.shardNest.model.User;
 import com.shardNest.repository.UserRepository;
 import com.shardNest.shard.Shard;
+import com.shardNest.shard.ShardOperationService;
 import com.shardNest.shard.ShardRouter;
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,58 +18,66 @@ import java.util.Optional;
 @Service
 public class UserService {
 
-    @Autowired
-    private ModelMapper modelMapper;
-
-    @Autowired
-    private UserRepository userRepository;
-
-    @Autowired
-    private ShardRouter router;
+    @Autowired private ModelMapper modelMapper;
+    @Autowired private UserRepository userRepository;
+    @Autowired private ShardRouter router;
+    @Autowired private ShardOperationService shardOp;
 
     public UserResponse addUser(UserRequest userRequest) {
-
         User user = modelMapper.map(userRequest, User.class);
 
         String userId = UlidCreator.getUlid().toString();
         user.setUserId(userId);
 
         Shard shard = router.getShard(userId);
-
         ShardContext.setShard(shard.getShardId());
-        System.out.println("Selected - " + shard);
 
         try {
-            // Save into selected shard
-            User savedUser = userRepository.save(user);
-
+            User savedUser = userRepository.saveAndFlush(user);
             return modelMapper.map(savedUser, UserResponse.class);
-
         } finally {
-
-            // Very important with ThreadLocal
             ShardContext.clear();
         }
     }
 
     public UserResponse getUserById(String userId) {
-        Shard shard = router.getShard(userId);
-        ShardContext.setShard(shard.getShardId());
-        System.out.println("Selected - " + shard);
+        Shard primary = router.getShard(userId);
+        UserResponse r = readFromShard(primary, userId);
+        if (r != null) return r;
 
+        for (Shard shard : router.getAllShards()) {
+            if (shard.getShardId().equals(primary.getShardId())) continue;
+            r = readFromShard(shard, userId);
+            if (r != null) return r;
+        }
+        return null;
+    }
+
+    private UserResponse readFromShard(Shard shard, String userId) {
+        ShardContext.setShard(shard.getShardId());
         try {
             Optional<User> userOptional = userRepository.findById(userId);
-            return modelMapper.map(userOptional, UserResponse.class);
+            return userOptional
+                    .map(u -> modelMapper.map(u, UserResponse.class))
+                    .orElse(null);
         } finally {
-            ShardContext.clear();  // ← CRITICAL
+            ShardContext.clear();
         }
-
     }
 
     public boolean deleteUserById(String userId) {
-        Shard shard = router.getShard(userId);
+        Shard primary = router.getShard(userId);
+        if (deleteFromShard(primary, userId)) return true;
+
+        for (Shard shard : router.getAllShards()) {
+            if (shard.getShardId().equals(primary.getShardId())) continue;
+            if (deleteFromShard(shard, userId)) return true;
+        }
+        return false;
+    }
+
+    private boolean deleteFromShard(Shard shard, String userId) {
         ShardContext.setShard(shard.getShardId());
-        System.out.println("Selected - " + shard);
         try {
             if (userRepository.existsById(userId)) {
                 userRepository.deleteById(userId);
@@ -76,7 +85,7 @@ public class UserService {
             }
             return false;
         } finally {
-            ShardContext.clear();  // ← CRITICAL
+            ShardContext.clear();
         }
     }
 }

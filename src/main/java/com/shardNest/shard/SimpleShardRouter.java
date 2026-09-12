@@ -1,7 +1,6 @@
 package com.shardNest.shard;
 
 import java.util.List;
-import java.util.UUID;
 
 public class SimpleShardRouter implements ShardRouter{
 
@@ -18,5 +17,10 @@ public class SimpleShardRouter implements ShardRouter{
                 shards.size()
         );
         return shards.get(index);
+    }
+
+    @Override
+    public List<Shard> getAllShards() {
+        return List.copyOf(shards);
     }
 }

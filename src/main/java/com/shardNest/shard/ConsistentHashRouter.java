@@ -1,20 +1,9 @@
 package com.shardNest.shard;
 
-
 import java.util.List;
 
 public class ConsistentHashRouter implements ShardRouter {
 
-    /**
-     * Default number of virtual nodes per shard.
-     *
-     * Rule of thumb:
-     *  - 100 VNodes  → good distribution for small clusters
-     *  - 200 VNodes  → very good distribution
-     *  - 500+ VNodes → diminishing returns, more memory
-     *
-     * Start with 100 for learning.
-     */
     private static final int DEFAULT_VNODE_COUNT = 100;
 
     private final HashRing ring;
@@ -37,6 +26,11 @@ public class ConsistentHashRouter implements ShardRouter {
         return ring.getShard(key);
     }
 
+    @Override
+    public List<Shard> getAllShards() {
+        return ring.getDistinctShards();
+    }
+
     public HashRing getRing() {
         return ring;
     }
@@ -45,11 +39,11 @@ public class ConsistentHashRouter implements ShardRouter {
         return vnodeCount;
     }
 
-    public void addShard(Shard shard) {
+    public synchronized void addShard(Shard shard) {
         ring.addShard(shard, vnodeCount);
     }
 
-    public void removeShard(Shard shard) {
+    public synchronized void removeShard(Shard shard) {
         ring.removeShard(shard, vnodeCount);
     }
 }
