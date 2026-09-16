@@ -44,26 +44,4 @@ public class UserController {
         return ResponseEntity.noContent().build();
     }
 
-    @GetMapping("/test")
-    public void testShard() {
-        List<Shard> shards = List.of(
-                new Shard("shard-1", "shard_db_1"),
-                new Shard("shard-2", "shard_db_2"),
-                new Shard("shard-3", "shard_db_3")
-        );
-
-        ShardRouter router = new SimpleShardRouter(shards);
-
-//        for (int i = 1; i <= 20; i++) {
-//
-//            String key = "user-" + i;
-//
-//            Shard shard = router.getShard(key);
-//
-//            System.out.println(
-//                    key + " -> " + shard.getShardId()
-//            );
-//        }
-    }
-
 }

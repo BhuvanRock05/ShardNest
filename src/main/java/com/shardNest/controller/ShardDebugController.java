@@ -130,4 +130,21 @@ public class ShardDebugController {
         // Expected: ~25% (1/4 of keys move to new shard)
     }
 
+    @GetMapping("/replicas/{key}")
+    public Map<String, Object> showReplicas(@PathVariable String key,
+                                            @RequestParam(defaultValue = "3") int rf) {
+        List<Shard> shards = consistentHashRouter.getRing().getShards(key, rf);
+        List<String> shardIds = shards.stream()
+                .map(Shard::getShardId)
+                .toList();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("key", key);
+        result.put("rf", rf);
+        result.put("primary", shardIds.isEmpty() ? null : shardIds.get(0));
+        result.put("replicas", shardIds.size() > 1 ? shardIds.subList(1, shardIds.size()) : List.of());
+        result.put("all", shardIds);
+        return result;
+    }
+
 }

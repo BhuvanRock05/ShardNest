@@ -34,3 +34,16 @@ spring:
     properties:
       hibernate:
         dialect: org.hibernate.dialect.MySQLDialect
+
+
+shard:
+  provision:
+    # Credentials used to CREATE new databases
+    admin-username: root
+    admin-password: root@123
+    host: localhost
+    port: 3306
+
+    # Connection pool settings for auto-created shards
+    max-pool-size: 10
+    min-idle: 2

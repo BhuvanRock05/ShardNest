@@ -1,15 +1,19 @@
 package com.shardNest.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 import org.springframework.jdbc.datasource.lookup.AbstractRoutingDataSource;
 
 import javax.sql.DataSource;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+@Slf4j
 public class ShardRoutingDataSource extends AbstractRoutingDataSource {
 
     private final Map<Object, Object> mutableTargetMap = new ConcurrentHashMap<>();
+
 
     @Override
     public void setTargetDataSources(Map<Object, Object> targetDataSources) {
@@ -21,8 +25,7 @@ public class ShardRoutingDataSource extends AbstractRoutingDataSource {
     @Override
     protected @Nullable Object determineCurrentLookupKey() {
         Object shard = ShardContext.getShard();
-        System.out.println(">>> ROUTING to shard: " + shard
-                + " [thread=" + Thread.currentThread().getName() + "]");
+        log.info(">>> ROUTING to shard: {} [thread={}]", shard, Thread.currentThread().getName());
         return shard;
     }
 
@@ -34,5 +37,17 @@ public class ShardRoutingDataSource extends AbstractRoutingDataSource {
     public void removeShardDataSource(String shardId) {
         mutableTargetMap.remove(shardId);
         afterPropertiesSet();
+    }
+
+    /** ⭐ New: check if a shard's DataSource is registered. */
+    public boolean hasShard(String shardId) {
+        return mutableTargetMap.containsKey(shardId);
+    }
+
+    /** ⭐ New: list all registered shard IDs. */
+    public Set<String> registeredShardIds() {
+        return mutableTargetMap.keySet().stream()
+                .map(Object::toString)
+                .collect(java.util.stream.Collectors.toSet());
     }
 }

@@ -3,9 +3,7 @@ package com.shardNest.shard;
 import com.google.common.hash.Hashing;
 
 import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.SortedMap;
-import java.util.TreeMap;
+import java.util.*;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 public class HashRing {
@@ -75,5 +73,35 @@ public class HashRing {
         return ring.values().stream()
                 .distinct()
                 .toList();
+    }
+
+    public List<Shard> getShards(String key, int count) {
+        if (ring.isEmpty()) {
+            throw new IllegalStateException("Hash ring is empty");
+        }
+        if (count <= 0) {
+            throw new IllegalArgumentException("count must be > 0");
+        }
+
+        int keyHash = hash(key);
+        List<Shard> result = new ArrayList<>(count);
+        Set<String> seenShardIds = new HashSet<>();
+
+        // Combine tailMap + headMap for a wrapped iteration
+        List<Map.Entry<Integer, Shard>> combined = new ArrayList<>();
+        combined.addAll(ring.tailMap(keyHash).entrySet());
+        combined.addAll(ring.headMap(keyHash).entrySet());
+
+        for (Map.Entry<Integer, Shard> entry : combined) {
+            Shard shard = entry.getValue();
+            if (seenShardIds.add(shard.getShardId())) {
+                result.add(shard);
+                if (result.size() == count) {
+                    break;
+                }
+            }
+        }
+
+        return result;
     }
 }
