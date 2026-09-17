@@ -1,9 +1,10 @@
 package com.shardNest.controller;
 
 
-import com.shardNest.shard.ConsistentHashRouter;
-import com.shardNest.shard.HashRing;
-import com.shardNest.shard.Shard;
+import com.shardNest.config.ShardContext;
+import com.shardNest.model.Address;
+import com.shardNest.model.User;
+import com.shardNest.shard.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,6 +16,12 @@ public class ShardDebugController {
 
     @Autowired
     private ConsistentHashRouter consistentHashRouter;
+
+    @Autowired
+    private ShardOperationService shardOp;
+
+    @Autowired
+    private ShardRouter shardRouter;   // ← Add field
 
     /**
      * Show the FULL ring (all VNodes) — will be huge with 300 positions!
@@ -132,18 +139,110 @@ public class ShardDebugController {
 
     @GetMapping("/replicas/{key}")
     public Map<String, Object> showReplicas(@PathVariable String key,
-                                            @RequestParam(defaultValue = "3") int rf) {
-        List<Shard> shards = consistentHashRouter.getRing().getShards(key, rf);
+                                            @RequestParam(required = false) Integer rf) {
+        List<Shard> shards = (rf != null)
+                ? consistentHashRouter.getReplicas(key, rf)
+                : consistentHashRouter.getReplicas(key);
+
         List<String> shardIds = shards.stream()
                 .map(Shard::getShardId)
                 .toList();
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("key", key);
-        result.put("rf", rf);
+        result.put("rf", shards.size());
         result.put("primary", shardIds.isEmpty() ? null : shardIds.get(0));
-        result.put("replicas", shardIds.size() > 1 ? shardIds.subList(1, shardIds.size()) : List.of());
+        result.put("replicas", shardIds.size() > 1
+                ? shardIds.subList(1, shardIds.size())
+                : List.of());
         result.put("all", shardIds);
+        return result;
+    }
+
+    @GetMapping("/consistency-check/{key}")
+    public Map<String, Object> consistencyCheck(@PathVariable String key) {
+        HashRing ring = consistentHashRouter.getRing();
+
+        // Get the ring's raw state
+        Map<Integer, String> rawRing = new TreeMap<>();
+        ring.getRing().forEach((pos, shard) -> rawRing.put(pos, shard.getShardId()));
+
+        // Path A
+        Shard viaGetShard = ring.getShard(key);
+
+        // Path B
+        List<Shard> viaGetShards = ring.getShards(key, 3);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("key", key);
+        result.put("ringSize", ring.size());
+        result.put("getShard", viaGetShard.getShardId());
+        result.put("getShards_all", viaGetShards.stream().map(Shard::getShardId).toList());
+        result.put("getShards_primary", viaGetShards.get(0).getShardId());
+        result.put("match", viaGetShard.getShardId().equals(viaGetShards.get(0).getShardId()));
+        result.put("rawRingSize", rawRing.size());
+        return result;
+    }
+
+
+    @PostMapping("/test-write-replicas/{key}")
+    public Map<String, Object> testWriteReplicas(@PathVariable String key) {
+        // Build a fake user
+        User u = new User();
+        u.setUserId(key);
+        u.setUserName("test-user");
+        u.setPassword("test");
+        u.setFirstName("Test");
+        u.setLastName("User");
+        u.setEmail(key + "@test.com");
+        u.setPhone("0000000000");
+
+        Address addr = new Address();
+        addr.setStreet("123 Test St");
+        addr.setCity("Testville");
+        addr.setState("TS");
+        addr.setCountry("Testland");
+        addr.setZipCode("00000");
+        u.setAddress(addr);
+
+        // Get replicas from router
+        List<Shard> replicas = consistentHashRouter.getReplicas(key);
+
+        // Write to all
+        ShardOperationService.WriteResult result = shardOp.writeToReplicas(replicas, u);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("key", key);
+        response.put("replicas", replicas.stream().map(Shard::getShardId).toList());
+        response.put("attempted", result.attempted());
+        response.put("succeeded", result.succeeded());
+        response.put("failed", result.failedShardIds());
+        response.put("fullyReplicated", result.isFullyReplicated());
+        return response;
+    }
+
+
+    @GetMapping("/user-locations/{userId}")
+    public Map<String, Object> userLocations(@PathVariable String userId) {
+
+        // Expected: where the ring says the user should be
+        List<String> expected = consistentHashRouter.getReplicas(userId).stream()
+                .map(Shard::getShardId)
+                .toList();
+
+        // Actual: where the user really exists
+        List<String> actual = new ArrayList<>();
+        for (Shard shard : consistentHashRouter.getAllShards()) {
+            if (shardOp.existsOnShard(userId, shard.getShardId())) {
+                actual.add(shard.getShardId());
+            }
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("userId", userId);
+        result.put("expectedReplicas", expected);
+        result.put("actualLocations", actual);
+        result.put("inSync", new HashSet<>(expected).equals(new HashSet<>(actual)));
         return result;
     }
 

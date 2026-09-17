@@ -7,15 +7,23 @@ import com.shardNest.dto.UserResponse;
 import com.shardNest.model.User;
 import com.shardNest.repository.UserRepository;
 import com.shardNest.shard.Shard;
+import com.shardNest.shard.ShardOperationService;
 import com.shardNest.shard.ShardRouter;
 import org.modelmapper.ModelMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 @Service
 public class UserService {
+
+    private static final Logger log = LoggerFactory.getLogger(UserService.class);
 
     @Autowired
     private ModelMapper modelMapper;
@@ -26,81 +34,136 @@ public class UserService {
     @Autowired
     private ShardRouter router;
 
+    @Autowired
+    private ShardOperationService shardOp;
+
+    // ═══════════════════════════════════════════════
+    // CREATE — quorum write
+    // ═══════════════════════════════════════════════
     public UserResponse addUser(UserRequest userRequest) {
         User user = modelMapper.map(userRequest, User.class);
 
         String userId = UlidCreator.getUlid().toString();
         user.setUserId(userId);
 
-        Shard shard = router.getShard(userId);
-        ShardContext.setShard(shard.getShardId());
+        List<Shard> replicas = router.getReplicas(userId);
+        log.info("Creating user {} → replicas {}", userId,
+                replicas.stream().map(Shard::getShardId).toList());
 
-        try {
-            User savedUser = userRepository.saveAndFlush(user);
-            return modelMapper.map(savedUser, UserResponse.class);
-        } finally {
-            ShardContext.clear();
+        ShardOperationService.WriteResult result =
+                shardOp.writeToReplicasWithQuorum(replicas, user);
+
+        if (!result.isFullyReplicated()) {
+            log.warn("User {} only replicated to {}/{} shards. Failed: {}",
+                    userId, result.succeeded(), result.attempted(), result.failedShardIds());
         }
+
+        return modelMapper.map(user, UserResponse.class);
     }
 
-    /**
-     * Read with fallback — tries primary shard, then all other shards.
-     * Safe during migration.
-     */
+    // ═══════════════════════════════════════════════
+    // READ — primary → replicas → all shards (fallback)
+    // ═══════════════════════════════════════════════
     public UserResponse getUserById(String userId) {
-        Shard primary = router.getShard(userId);
+        List<Shard> replicas = router.getReplicas(userId);
 
-        // 1. Try primary shard
-        UserResponse response = readFromShard(primary, userId);
-        if (response != null) return response;
+        // 1. Try replicas in order (primary first)
+        for (Shard shard : replicas) {
+            UserResponse response = readFromShardSafe(shard, userId);
+            if (response != null) {
+                return response;
+            }
+        }
 
-        // 2. Fallback: try all other shards (during migration, data may not have moved yet)
+        // 2. Fallback: try OTHER shards not in the replica set
+        Set<String> replicaIds = new HashSet<>();
+        replicas.forEach(s -> replicaIds.add(s.getShardId()));
+
         for (Shard shard : router.getAllShards()) {
-            if (shard.getShardId().equals(primary.getShardId())) continue;
-            response = readFromShard(shard, userId);
-            if (response != null) return response;
+            if (replicaIds.contains(shard.getShardId())) continue;
+            UserResponse response = readFromShardSafe(shard, userId);
+            if (response != null) {
+                log.warn("User {} found on non-replica shard {} — rebalance may be in progress",
+                        userId, shard.getShardId());
+                return response;
+            }
         }
 
         return null;
     }
 
-    private UserResponse readFromShard(Shard shard, String userId) {
+    /**
+     * Read from one shard, catching ANY exception.
+     * Returns null on error — caller falls through to next replica.
+     */
+    private UserResponse readFromShardSafe(Shard shard, String userId) {
         ShardContext.setShard(shard.getShardId());
         try {
             Optional<User> userOptional = userRepository.findById(userId);
             return userOptional
                     .map(u -> modelMapper.map(u, UserResponse.class))
                     .orElse(null);
+        } catch (Exception e) {
+            log.warn("Read from shard {} failed for user {}: {}",
+                    shard.getShardId(), userId, e.getMessage());
+            return null;
         } finally {
             ShardContext.clear();
         }
     }
 
-    /**
-     * Delete with fallback — find where the user actually lives, then delete.
-     */
+    // ═══════════════════════════════════════════════
+    // DELETE — from all replicas
+    // ═══════════════════════════════════════════════
     public boolean deleteUserById(String userId) {
-        Shard primary = router.getShard(userId);
+        List<Shard> replicas = router.getReplicas(userId);
 
-        // 1. Try primary
-        if (deleteFromShard(primary, userId)) return true;
-
-        // 2. Fallback: try other shards
-        for (Shard shard : router.getAllShards()) {
-            if (shard.getShardId().equals(primary.getShardId())) continue;
-            if (deleteFromShard(shard, userId)) return true;
+        // Check existence (safe version)
+        boolean foundAnywhere = false;
+        for (Shard shard : replicas) {
+            if (existsInShardSafe(shard, userId)) {
+                foundAnywhere = true;
+                break;
+            }
         }
 
-        return false;
+        if (!foundAnywhere) {
+            Set<String> replicaIds = new HashSet<>();
+            replicas.forEach(s -> replicaIds.add(s.getShardId()));
+
+            for (Shard shard : router.getAllShards()) {
+                if (replicaIds.contains(shard.getShardId())) continue;
+                if (existsInShardSafe(shard, userId)) {
+                    foundAnywhere = true;
+                    break;
+                }
+            }
+        }
+
+        if (!foundAnywhere) {
+            return false;
+        }
+
+        // Delete from all replicas (already failure-tolerant inside shardOp)
+        ShardOperationService.WriteResult result =
+                shardOp.deleteFromReplicas(replicas, userId);
+
+        log.info("Deleted user {} → {}/{} replicas (failed: {})",
+                userId, result.succeeded(), result.attempted(), result.failedShardIds());
+
+        return result.succeeded() > 0;
     }
 
-    private boolean deleteFromShard(Shard shard, String userId) {
+    /**
+     * Check existence safely — catch any exception and treat as "not found".
+     */
+    private boolean existsInShardSafe(Shard shard, String userId) {
         ShardContext.setShard(shard.getShardId());
         try {
-            if (userRepository.existsById(userId)) {
-                userRepository.deleteById(userId);
-                return true;
-            }
+            return userRepository.existsById(userId);
+        } catch (Exception e) {
+            log.warn("existsById on shard {} failed for user {}: {}",
+                    shard.getShardId(), userId, e.getMessage());
             return false;
         } finally {
             ShardContext.clear();

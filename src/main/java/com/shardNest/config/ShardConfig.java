@@ -3,6 +3,7 @@ package com.shardNest.config;
 import com.shardNest.shard.ConsistentHashRouter;
 import com.shardNest.shard.Shard;
 import com.shardNest.shard.ShardRouter;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
@@ -11,6 +12,10 @@ import java.util.List;
 
 @Configuration
 public class ShardConfig {
+
+    @Value("${shard.replication.factor:3}")
+    private int replicationFactor;
+
 
     @Bean
     public List<Shard> shards() {
@@ -24,6 +29,6 @@ public class ShardConfig {
     @Bean
     @Primary  // ← Both ShardRouter AND ConsistentHashRouter resolve here
     public ConsistentHashRouter consistentHashRouter(List<Shard> shards) {
-        return new ConsistentHashRouter(shards, 100);
+        return new ConsistentHashRouter(shards, 100, replicationFactor);
     }
 }

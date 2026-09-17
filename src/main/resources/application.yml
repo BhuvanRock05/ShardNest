@@ -37,6 +37,10 @@ spring:
 
 
 shard:
+  replication:
+    factor: 3
+    write-quorum: 2
+    read-quorum: 2
   provision:
     # Credentials used to CREATE new databases
     admin-username: root

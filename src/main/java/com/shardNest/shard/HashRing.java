@@ -44,17 +44,50 @@ public class HashRing {
         return ring.get(shardPosition);
     }
 
+    public List<Shard> getShards(String key, int count) {
+        if (ring.isEmpty()) {
+            throw new IllegalStateException("Hash ring is empty");
+        }
+        if (count <= 0) {
+            throw new IllegalArgumentException("count must be > 0");
+        }
+
+        int keyHash = hash(key);
+        List<Shard> result = new ArrayList<>(count);
+        Set<String> seenShardIds = new HashSet<>();
+
+        List<Map.Entry<Integer, Shard>> combined = new ArrayList<>();
+        combined.addAll(ring.tailMap(keyHash).entrySet());
+        combined.addAll(ring.headMap(keyHash).entrySet());
+
+        for (Map.Entry<Integer, Shard> entry : combined) {
+            Shard shard = entry.getValue();
+            if (seenShardIds.add(shard.getShardId())) {
+                result.add(shard);
+                if (result.size() == count) {
+                    break;
+                }
+            }
+        }
+
+        return result;
+    }
+
     /**
-     * Hash function using Murmur3 for excellent distribution.
-     *
-     * Why not String.hashCode()?
-     *  - String.hashCode() is linear: changing "shard1#0" → "shard1#1"
-     *    only changes the hash by +1.
-     *  - Result: VNodes cluster at consecutive positions instead of
-     *    spreading across the ring.
-     *  - Murmur3 has the "avalanche effect": one bit change flips ~50%
-     *    of output bits, spreading VNodes evenly.
+     * Return a deep copy of this ring.
+     * Used during rebalancing to compute OLD vs NEW replica sets.
      */
+    public HashRing copyOf() {
+        HashRing copy = new HashRing();
+        copy.ring.putAll(this.ring);
+        return copy;
+    }
+
+    // Backward-compatible alias
+    public HashRing snapshot() {
+        return copyOf();
+    }
+
     private int hash(String key) {
         return Hashing.murmur3_32_fixed()
                 .hashString(key, StandardCharsets.UTF_8)
@@ -73,35 +106,5 @@ public class HashRing {
         return ring.values().stream()
                 .distinct()
                 .toList();
-    }
-
-    public List<Shard> getShards(String key, int count) {
-        if (ring.isEmpty()) {
-            throw new IllegalStateException("Hash ring is empty");
-        }
-        if (count <= 0) {
-            throw new IllegalArgumentException("count must be > 0");
-        }
-
-        int keyHash = hash(key);
-        List<Shard> result = new ArrayList<>(count);
-        Set<String> seenShardIds = new HashSet<>();
-
-        // Combine tailMap + headMap for a wrapped iteration
-        List<Map.Entry<Integer, Shard>> combined = new ArrayList<>();
-        combined.addAll(ring.tailMap(keyHash).entrySet());
-        combined.addAll(ring.headMap(keyHash).entrySet());
-
-        for (Map.Entry<Integer, Shard> entry : combined) {
-            Shard shard = entry.getValue();
-            if (seenShardIds.add(shard.getShardId())) {
-                result.add(shard);
-                if (result.size() == count) {
-                    break;
-                }
-            }
-        }
-
-        return result;
     }
 }

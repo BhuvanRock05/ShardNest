@@ -87,4 +87,18 @@ public class ShardAdminController {
                 "shards", shardRouter.getAllShards().size()
         );
     }
+
+    @PostMapping("/backfill")
+    public ResponseEntity<?> backfill() {
+        try {
+            ShardManager.BackfillResult result = shardManager.backfillReplicas();
+            return ResponseEntity.ok(Map.of(
+                    "scanned", result.scanned(),
+                    "fixed", result.fixed(),
+                    "status", "OK"
+            ));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        }
+    }
 }
