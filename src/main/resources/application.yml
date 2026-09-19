@@ -20,6 +20,7 @@ spring:
       username: root
       password: root@123
       driver-class-name: com.mysql.cj.jdbc.Driver
+
     shard4:
       jdbc-url: jdbc:mysql://localhost:3306/userdb4
       username: root
@@ -35,19 +36,27 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.MySQLDialect
 
+  # ⭐ Redis — minimal config (timeouts handled in RedisConfig.java)
+  data:
+    redis:
+      host: localhost
+      port: 6379
 
 shard:
   replication:
     factor: 3
     write-quorum: 2
     read-quorum: 2
+
+  cache:
+    enabled: true
+    ttl-seconds: 600
+    key-prefix: "shardnest:"
+
   provision:
-    # Credentials used to CREATE new databases
     admin-username: root
     admin-password: root@123
     host: localhost
     port: 3306
-
-    # Connection pool settings for auto-created shards
     max-pool-size: 10
     min-idle: 2

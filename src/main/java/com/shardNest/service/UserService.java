@@ -1,6 +1,7 @@
 package com.shardNest.service;
 
 import com.github.f4b6a3.ulid.UlidCreator;
+import com.shardNest.cache.CacheService;
 import com.shardNest.config.ShardContext;
 import com.shardNest.dto.UserRequest;
 import com.shardNest.dto.UserResponse;
@@ -37,6 +38,9 @@ public class UserService {
     @Autowired
     private ShardOperationService shardOp;
 
+    @Autowired
+    private CacheService cacheService;
+
     // ═══════════════════════════════════════════════
     // CREATE — quorum write
     // ═══════════════════════════════════════════════
@@ -61,21 +65,28 @@ public class UserService {
         return modelMapper.map(user, UserResponse.class);
     }
 
+
     // ═══════════════════════════════════════════════
-    // READ — primary → replicas → all shards (fallback)
+    // READ — cache → primary → replicas → all shards
     // ═══════════════════════════════════════════════
     public UserResponse getUserById(String userId) {
-        List<Shard> replicas = router.getReplicas(userId);
+        // 1. Try cache
+        UserResponse cached = cacheService.get("user", userId, UserResponse.class);
+        if (cached != null) {
+            return cached;
+        }
 
-        // 1. Try replicas in order (primary first)
+        // 2. Cache miss — try replicas in order (primary first)
+        List<Shard> replicas = router.getReplicas(userId);
         for (Shard shard : replicas) {
             UserResponse response = readFromShardSafe(shard, userId);
             if (response != null) {
+                cacheService.put("user", userId, response);
                 return response;
             }
         }
 
-        // 2. Fallback: try OTHER shards not in the replica set
+        // 3. Fallback: try other shards not in the replica set
         Set<String> replicaIds = new HashSet<>();
         replicas.forEach(s -> replicaIds.add(s.getShardId()));
 
@@ -83,12 +94,14 @@ public class UserService {
             if (replicaIds.contains(shard.getShardId())) continue;
             UserResponse response = readFromShardSafe(shard, userId);
             if (response != null) {
-                log.warn("User {} found on non-replica shard {} — rebalance may be in progress",
+                log.warn("User {} found on non-replica shard {} — caching anyway",
                         userId, shard.getShardId());
+                cacheService.put("user", userId, response);
                 return response;
             }
         }
 
+        // 4. Not found anywhere — don't cache negative results
         return null;
     }
 
@@ -151,6 +164,9 @@ public class UserService {
         log.info("Deleted user {} → {}/{} replicas (failed: {})",
                 userId, result.succeeded(), result.attempted(), result.failedShardIds());
 
+        if (result.succeeded() > 0) {
+            cacheService.evict("user", userId);
+        }
         return result.succeeded() > 0;
     }
 
