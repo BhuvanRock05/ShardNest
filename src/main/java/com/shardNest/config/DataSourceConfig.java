@@ -39,11 +39,18 @@ public class DataSourceConfig {
     }
 
     @Bean
+    @ConfigurationProperties("spring.datasource.shard4")
+    public DataSource shard4DataSource() {
+        return DataSourceBuilder.create().build();
+    }
+
+    @Bean
     @Primary
     public DataSource routingDataSource(
             @Qualifier("shard1DataSource") DataSource shard1,
             @Qualifier("shard2DataSource") DataSource shard2,
-            @Qualifier("shard3DataSource") DataSource shard3
+            @Qualifier("shard3DataSource") DataSource shard3,
+            @Qualifier("shard4DataSource") DataSource shard4
     ) {
 
         Map<Object, Object> targetDataSources =
@@ -52,6 +59,7 @@ public class DataSourceConfig {
         targetDataSources.put("shard1", shard1);
         targetDataSources.put("shard2", shard2);
         targetDataSources.put("shard3", shard3);
+        targetDataSources.put("shard4", shard4);
 
         ShardRoutingDataSource routingDataSource = new ShardRoutingDataSource();
         routingDataSource.setTargetDataSources(targetDataSources);

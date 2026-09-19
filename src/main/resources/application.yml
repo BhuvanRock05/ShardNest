@@ -20,11 +20,34 @@ spring:
       username: root
       password: root@123
       driver-class-name: com.mysql.cj.jdbc.Driver
+    shard4:
+      jdbc-url: jdbc:mysql://localhost:3306/userdb4
+      username: root
+      password: root@123
+      driver-class-name: com.mysql.cj.jdbc.Driver
 
   jpa:
     hibernate:
       ddl-auto: validate
     show-sql: true
+    open-in-view: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.MySQLDialect
+
+
+shard:
+  replication:
+    factor: 3
+    write-quorum: 2
+    read-quorum: 2
+  provision:
+    # Credentials used to CREATE new databases
+    admin-username: root
+    admin-password: root@123
+    host: localhost
+    port: 3306
+
+    # Connection pool settings for auto-created shards
+    max-pool-size: 10
+    min-idle: 2
