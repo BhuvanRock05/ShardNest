@@ -1,650 +1,244 @@
 # ShardNest — Distributed Sharded Database
 
-A distributed sharded database built from scratch using **Java and Spring Boot**.
+![Java](https://img.shields.io/badge/Java-23-orange)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1-brightgreen)
+![MySQL](https://img.shields.io/badge/MySQL-Sharded-blue)
+![Redis](https://img.shields.io/badge/Redis-Cache-red)
+![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-ShardNest demonstrates the core concepts behind modern distributed data stores, including **consistent hashing, virtual nodes, sharding, replication, quorum-based writes, fault tolerance, live rebalancing, and Redis caching**.
-
----
-
-## 🎯 What This Project Demonstrates
-
-* **Consistent hashing with virtual nodes** — distributes data across shards while minimizing data movement when nodes are added or removed.
-* **Dynamic shard provisioning** — add new database nodes at runtime through REST APIs.
-* **Live rebalancing** — redistribute data when the cluster topology changes.
-* **Replication factor 3 (RF=3)** — maintains three copies of each data item for fault tolerance.
-* **Quorum writes (W=2)** — requires acknowledgements from at least two replicas before considering a write successful.
-* **Quorum reads (R=2)** — reads from multiple replicas to improve reliability and consistency.
-* **Fault-tolerant reads** — automatically falls back to other replicas when a node is unavailable.
-* **Backfill / reconciliation** — repairs under-replicated or inconsistent data.
-* **Redis cache-aside** — caches frequently accessed data to reduce database load.
-* **Delete-on-write cache invalidation** — invalidates stale cache entries after successful database writes.
-* **Dynamic node management** — supports adding and removing nodes from the cluster.
-* **Observability and load testing** — designed to measure system behavior under distributed workloads.
+A sharded database layer built from scratch in **Java / Spring Boot**. ShardNest implements **consistent hashing**, **RF=3 replication**, **quorum writes**, **live rebalancing**, and **Redis caching**, the same core ideas behind systems like Cassandra, DynamoDB, and MongoDB.
 
 ---
 
-## 🏗️ Architecture
+## Features
 
-```text
-                           ┌─────────────────┐
-                           │     Client      │
-                           └────────┬────────┘
-                                    │
-                                    ▼
-                           ┌─────────────────┐
-                           │   ShardNest     │
-                           │   Application   │
-                           └────────┬────────┘
-                                    │
-                     ┌──────────────┴──────────────┐
-                     │                             │
-                     ▼                             ▼
-              ┌─────────────┐              ┌─────────────────┐
-              │    Redis    │              │ Consistent Hash │
-              │    Cache    │              │      Ring       │
-              └──────┬──────┘              └────────┬────────┘
-                     │                              │
-              Cache HIT │ MISS                      ▼
-                     │                     ┌─────────────────┐
-                     │                     │ Virtual Nodes   │
-                     │                     └────────┬────────┘
-                     │                              │
-                     │                              ▼
-                     │                     ┌─────────────────┐
-                     │                     │ Physical Shard  │
-                     │                     └────────┬────────┘
-                     │                              │
-                     │                     ┌────────┴────────┐
-                     │                     │                 │
-                     │                     ▼                 ▼
-                     │                  Primary          Replicas
-                     │                     │             ┌───┴───┐
-                     │                     │             │       │
-                     │                     ▼             ▼       ▼
-                     │                  MySQL          MySQL   MySQL
-                     │
-                     └─────────────── Cache-Aside
-```
+- **Consistent hashing with virtual nodes**: even data distribution across shards
+- **Dynamic shard provisioning**: add new databases at runtime via REST API
+- **Live rebalancing**: add or remove shards while the system keeps serving requests
+- **Replication factor 3**: every record lives on 3 shards for fault tolerance
+- **Quorum writes (W=2 of N=3)**: fast, safe writes that tolerate one shard failure
+- **Fault-tolerant reads**: automatic fallback across replicas
+- **Backfill / reconciliation**: repair under-replicated data
+- **Redis cache-aside**: significantly faster reads and reduced database load
+- **Cache invalidation**: delete-on-write to avoid stale reads
+- **Debug endpoints**: inspect the ring, replica sets, data locations, and cache
 
 ---
 
-## 🔄 Request Flow
+## Architecture
 
-### Read Flow
-
-ShardNest follows a **cache-aside** strategy for reads.
-
-```text
-Client
-  │
-  ▼
-ShardNest
-  │
-  ▼
-Redis
-  │
-  ├── HIT ───────────────► Return data
-  │
-  └── MISS
-       │
-       ▼
-  Consistent Hashing
-       │
-       ▼
-    Shard
-       │
-       ▼
-   Database
-       │
-       ▼
-  Store in Redis
-       │
-       ▼
-  Return data
+```mermaid
+flowchart TD
+    A["HTTP API<br/>/api/user · /api/admin · /api/debug"] --> B["Redis Cache<br/>cache-aside reads"]
+    B -->|miss| C["Consistent Hash Ring<br/>100 VNodes per shard · Murmur3"]
+    C --> D["ShardOperationService<br/>quorum writes · fault-tolerant reads · rebalance · backfill"]
+    D --> S1[("shard1<br/>MySQL")]
+    D --> S2[("shard2<br/>MySQL")]
+    D --> S3[("shard3<br/>MySQL")]
+    D --> S4[("shard4<br/>MySQL")]
 ```
 
-### Write Flow
+**Request flow**
 
-```text
-Client
-  │
-  ▼
-ShardNest
-  │
-  ▼
-Consistent Hashing
-  │
-  ▼
-Primary + Replicas
-  │
-  ▼
-Write to replicas
-  │
-  ▼
-Wait for W = 2 acknowledgements
-  │
-  ▼
-Write successful
-  │
-  ▼
-Delete Redis cache entry
-```
-
-The database remains the **source of truth**, while Redis acts as a cache.
+1. **Read:** check Redis, and on a miss route the key through the hash ring, read from the primary (falling back to replicas), then populate the cache.
+2. **Write:** compute the replica set for the key, write to all 3 shards in parallel, and return success once 2 confirm. Then evict the cache entry.
+3. **Topology change:** adding or removing a shard updates the ring and migrates only the affected key ranges.
 
 ---
 
-## 🔁 Replication
+## Key Design Decisions
 
-ShardNest uses a **Replication Factor of 3**.
+### 1. Consistent Hashing over Modulo
 
-For a particular shard:
+With `hash(key) % N`, changing the shard count remaps most keys, forcing a near-total data migration. With consistent hashing, adding a shard moves only about **1/N of the keys**, and only the affected arc of the ring is touched. That makes rebalancing practical on a running system.
 
-```text
-                 Shard 1
-                    │
-          ┌─────────┼─────────┐
-          ▼         ▼         ▼
-       Node 1     Node 2    Node 3
-       PRIMARY    REPLICA   REPLICA
-          │         │         │
-          ▼         ▼         ▼
-        MySQL     MySQL     MySQL
-        users     users     users
-```
+### 2. Virtual Nodes (VNodes)
 
-Each replica contains the same logical data for that shard.
+If each shard sits at a single position on the ring, distribution is badly skewed. ShardNest places **100 VNodes per shard**, so the ring has hundreds of positions and each shard's share converges toward the ideal. The deviation shrinks roughly with `1/√vnodeCount`.
 
-### Replication Factor
+### 3. Murmur3 instead of `String.hashCode()`
 
-```text
-N = 3
-```
+`String.hashCode()` is nearly linear: `"shard1#0"` and `"shard1#1"` hash to values that differ by 1, so VNodes cluster together. **Murmur3** has a strong avalanche effect (one input bit change flips about half of the output bits), so VNodes spread evenly around the ring.
 
-means that each piece of data has three copies.
+### 4. RF=3 with Quorum Writes
 
-### Write Quorum
+- Each record is stored on 3 shards, so the system tolerates **one shard failure without data loss**.
+- Writes go to all replicas in parallel and succeed once **W=2** acknowledge, which is faster than waiting for all 3 while still surviving a single failure.
+- Reads currently fall back across replicas. Quorum reads with read repair (R=2, so W+R > N) are on the roadmap for stronger consistency guarantees.
 
-```text
-W = 2
-```
+### 5. `open-in-view: false`
 
-means at least two replicas must acknowledge a write.
+*The hardest bug in the project.* Spring's default `open-in-view: true` keeps the JPA `EntityManager` open for the entire HTTP request. Combined with `AbstractRoutingDataSource`, the datasource is chosen when the first query runs and reused afterward, so changing `ShardContext` mid-request has no effect and writes silently land on the wrong shard.
 
-For example:
+**Fix:** disable open-in-view and use `TransactionTemplate` (instead of `@Transactional`) so `ShardContext` is set **before** the transaction opens.
 
-```text
-Node 1 → ACK ✅
-Node 2 → ACK ✅
-Node 3 → Timeout ❌
+### 6. `saveAndFlush` and Fresh Entity Copies
 
-2 ACKs >= W(2)
+`save()` calls `merge()` for entities with a preset ID, so if the same object is already in the persistence context Hibernate issues an `UPDATE` instead of an `INSERT`.
 
-Write successful ✅
-```
+**Fix:** use `saveAndFlush()` and always write a **fresh copy** of the entity per shard, never reusing one object across shards.
 
-This allows the system to tolerate a single replica failure while still accepting writes.
+### 7. Cache-Aside over Write-Through
 
-### Read Quorum
+- **Read:** check cache, and on a miss read the DB, populate the cache, and return.
+- **Write:** write to the DB, then delete the cache entry so the next read repopulates it.
 
-```text
-R = 2
-```
-
-means the system waits for responses from at least two replicas for a quorum read.
-
-A commonly used quorum relationship is:
-
-```text
-W + R > N
-```
-
-For ShardNest:
-
-```text
-2 + 2 > 3
-```
+Updating the cache on write introduces race conditions with concurrent reads. Delete-on-write avoids them by forcing a fresh DB read.
 
 ---
 
-## 🧩 Consistent Hashing
-
-ShardNest uses a consistent hashing ring to determine which shard should store a particular key.
-
-```text
-                       Hash Ring
-                  ┌─────────────────┐
-                  │                 │
-              Node 1              Node 2
-                  │                 │
-                  │                 │
-              Node 4              Node 3
-                  │                 │
-                  └─────────────────┘
-```
-
-A key is hashed onto the ring and assigned to the next available node in the clockwise direction.
-
-### Virtual Nodes
-
-Each physical node owns multiple positions on the ring:
-
-```text
-Physical Node 1
- ├── vnode-1
- ├── vnode-2
- ├── vnode-3
- └── ...
-
-Physical Node 2
- ├── vnode-1
- ├── vnode-2
- ├── vnode-3
- └── ...
-```
-
-Virtual nodes improve data distribution and reduce hotspots.
-
----
-
-## ⚖️ Live Rebalancing
-
-When a new node is added:
-
-```text
-Before:
-
-Node 1 ───── Node 2 ───── Node 3
-```
-
-After adding Node 4:
-
-```text
-Node 1 ─── Node 2 ─── Node 4 ─── Node 3
-```
-
-Only the affected key ranges need to move instead of redistributing the entire dataset.
-
-### Rebalancing Flow
-
-```text
-Add Node
-   │
-   ▼
-Create DataSource
-   │
-   ▼
-Register Node
-   │
-   ▼
-Add Virtual Nodes
-   │
-   ▼
-Identify affected key ranges
-   │
-   ▼
-Move / Backfill data
-   │
-   ▼
-Replicate data
-   │
-   ▼
-Node becomes active
-```
-
----
-
-## 🛡️ Fault Tolerance
-
-If a replica becomes unavailable:
-
-```text
-Node 1 → PRIMARY   ❌
-Node 2 → REPLICA   ✅
-Node 3 → REPLICA   ✅
-```
-
-ShardNest can continue operating using the available replicas, depending on the configured quorum requirements.
-
-For writes:
-
-```text
-Node 1 → FAILED
-Node 2 → ACK
-Node 3 → ACK
-
-W = 2
-
-Write succeeds ✅
-```
-
-For reads, the system can fall back to available replicas when the preferred node is unavailable.
-
----
-
-## 🔧 Backfill & Reconciliation
-
-Replication can become incomplete because of:
-
-* Node failures
-* Network interruptions
-* Temporary database failures
-* Node additions
-* Node removals
-* Rebalancing
-
-ShardNest provides a reconciliation/backfill mechanism to identify data that is missing from replicas and restore the required replication factor.
-
-```text
-Expected:
-
-RF = 3
-
-Node 1 → Data ✅
-Node 2 → Data ✅
-Node 3 → Data ❌
-
-          │
-          ▼
-    Reconciliation
-          │
-          ▼
-Node 3 → Data restored ✅
-```
-
----
-
-## ⚡ Redis Caching
-
-ShardNest uses Redis with a **cache-aside** strategy.
-
-```text
-                ┌─────────────┐
-                │   Request   │
-                └──────┬──────┘
-                       │
-                       ▼
-                 ┌───────────┐
-                 │   Redis   │
-                 └─────┬─────┘
-                       │
-                ┌──────┴──────┐
-                │             │
-               HIT           MISS
-                │             │
-                ▼             ▼
-             Return         Database
-                              │
-                              ▼
-                         Redis SET
-                              │
-                              ▼
-                           Return
-```
-
-### Cache Invalidation
-
-ShardNest uses **delete-on-write**:
-
-```text
-UPDATE
-  │
-  ▼
-Database
-  │
-  ▼
-Replication / Quorum
-  │
-  ▼
-Successful write
-  │
-  ▼
-DELETE Redis key
-```
-
-The next read repopulates Redis from the database.
-
-This keeps the database as the source of truth and reduces the complexity of keeping two copies synchronized.
-
----
-
-## 🧱 Tech Stack
-
-| Layer         | Technology                         |
-| ------------- | ---------------------------------- |
-| Language      | Java 23                            |
-| Framework     | Spring Boot 4.1                    |
-| ORM           | Hibernate / Spring Data JPA        |
-| Database      | MySQL 9.2                          |
-| Sharding      | Consistent Hashing + Virtual Nodes |
-| Replication   | RF=3 + Quorum                      |
-| Cache         | Redis 7                            |
-| Redis Client  | Lettuce                            |
-| Serialization | Jackson 3                          |
-| Hash Function | Murmur3 (Guava)                    |
-| ID Generation | ULID                               |
-| Build Tool    | Maven                              |
-
----
-
-## 📁 High-Level Project Structure
-
-```text
-src/
-└── main/
-    ├── java/
-    │   └── com/
-    │       └── shardnest/
-    │           ├── config/
-    │           ├── controller/
-    │           ├── service/
-    │           ├── repository/
-    │           ├── entity/
-    │           ├── shard/
-    │           ├── replication/
-    │           ├── cache/
-    │           ├── rebalance/
-    │           └── ShardNestApplication.java
-    │
-    └── resources/
-        └── application.yml
-```
-
----
-
-## 🚀 Running ShardNest
+## Getting Started
 
 ### Prerequisites
 
-Make sure the following are installed:
+- Java 23
+- Maven
+- MySQL 8+ with four databases: `userdb1`, `userdb2`, `userdb3`, `userdb4`
+- Redis 7+ running on `localhost:6379`
 
-* Java 23
-* Maven
-* Docker
-* MySQL
-* Redis
-
-### Start Redis
+### Setup
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/yourusername/shardNest.git
+cd shardNest
+
+# 2. Create the four MySQL databases (userdb1 to userdb4).
+#    Tables are created automatically on startup.
+
+# 3. Start Redis
 docker run -d --name redis-shardnest -p 6379:6379 redis:7-alpine
-```
 
-Verify Redis:
-
-```bash
-docker ps
-```
-
-Test Redis:
-
-```bash
-docker exec -it redis-shardnest redis-cli
-```
-
-Then:
-
-```redis
-PING
-```
-
-Expected:
-
-```text
-PONG
-```
-
-### Build the project
-
-```bash
-mvn clean install
-```
-
-### Run the application
-
-```bash
+# 4. Run the application
 mvn spring-boot:run
 ```
 
----
-
-## ⚙️ Example Replication Configuration
-
-```yaml
-shard:
-  replication:
-    factor: 3
-    write-quorum: 2
-    read-quorum: 2
-```
-
-Where:
-
-| Configuration  | Meaning                                                          |
-| -------------- | ---------------------------------------------------------------- |
-| `factor`       | Number of replicas maintained                                    |
-| `write-quorum` | Minimum replica acknowledgements required for a successful write |
-| `read-quorum`  | Minimum replica responses required for a quorum read             |
+The API is available at `http://localhost:8080`. Additional shards can be provisioned at runtime through the admin API.
 
 ---
 
-## 🔑 Core Concepts
+## API Overview
 
-ShardNest combines several distributed-system concepts:
+### User
 
-```text
-                 ┌─────────────────────┐
-                 │     ShardNest       │
-                 └──────────┬──────────┘
-                            │
-                   Consistent Hashing
-                            │
-                            ▼
-                     Virtual Nodes
-                            │
-                            ▼
-                         Sharding
-                            │
-                            ▼
-                       Replication
-                            │
-                            ▼
-                     Quorum Consensus
-                            │
-                            ▼
-                       Fault Tolerance
-                            │
-                            ▼
-                     Rebalancing
-                            │
-                            ▼
-                         Redis
-                            │
-                            ▼
-                       Observability
-                            │
-                            ▼
-                       Load Testing
-```
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/user/create` | Create a user (replicated to 3 shards) |
+| GET | `/api/user/{id}` | Read a user (cache-aside) |
+| DELETE | `/api/user/delete/{id}` | Delete a user from all replicas |
 
----
+### Admin: Shards
 
-## 📈 Future Improvements
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/admin/shard/add` | Add a shard to the ring and rebalance |
+| POST | `/api/admin/shard/remove` | Remove a shard and drain its data |
+| POST | `/api/admin/shard/backfill` | Repair under-replicated users |
+| GET | `/api/admin/shard/list` | List all shards |
+| GET | `/api/admin/shard/status` | Check rebalance status |
 
-* [ ] Automatic failure detection
-* [ ] Leader election
-* [ ] Automatic replica promotion
-* [ ] Read repair
-* [ ] Hinted handoff
-* [ ] Write-ahead logging
-* [ ] Persistent node metadata
-* [ ] Prometheus metrics
-* [ ] Grafana dashboards
-* [ ] Distributed tracing
-* [ ] Docker Compose cluster
-* [ ] Kubernetes deployment
-* [ ] Automated load testing
-* [ ] Stronger consistency/versioning mechanisms
-* [ ] Cluster health monitoring
-* [ ] Automated data repair
+### Admin: DataSource Provisioning
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/admin/datasource/provision` | Create a database, tables, and DataSource at runtime |
+
+### Debug
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/debug/ring` | Full hash ring |
+| GET | `/api/debug/ring/summary` | VNode distribution summary |
+| GET | `/api/debug/route/{key}` | Route a key to its primary shard |
+| GET | `/api/debug/replicas/{key}` | Show the replica set for a key |
+| GET | `/api/debug/distribution/{count}` | Run a distribution test |
+| GET | `/api/debug/user-locations/{id}` | Compare expected vs actual replicas |
+| GET | `/api/debug/cache/health` | Redis health |
+| GET | `/api/debug/cache/user/{id}` | Inspect a cached entry |
 
 ---
 
-## 📚 Design Inspiration
+## Performance Characteristics
 
-ShardNest is inspired by concepts described in:
+Approximate figures from local development runs:
 
-* **Amazon Dynamo — 2007**
-  Consistent hashing, replication, and quorum-based distributed storage.
+| Operation | Latency | Notes |
+|-----------|---------|-------|
+| Cache hit | ~1–5 ms | No DB access |
+| Cache miss (read) | ~30–50 ms | DB read + cache write |
+| Create user (quorum) | ~50–100 ms | Parallel writes, W=2 |
+| Delete user | ~100–150 ms | Sequential across replicas |
+| Add shard | ~1–10 s | Depends on data size |
+| Backfill | ~1–60 s | Depends on data size |
 
-* **Apache Cassandra**
-  Virtual nodes, replication, partitioning, and tunable consistency.
+**Scalability notes**
 
-* **MongoDB**
-  Replica sets and distributed database architecture.
-
-* **Designing Data-Intensive Applications** by Martin Kleppmann
-  Distributed systems, replication, partitioning, consistency, and fault tolerance.
-
----
-
-## 🎯 Learning Goals
-
-The primary goal of ShardNest is to understand how distributed databases work internally rather than relying only on managed database features.
-
-The project focuses on:
-
-```text
-                    Distributed Storage
-                           │
-          ┌────────────────┼────────────────┐
-          ▼                ▼                ▼
-      Partitioning     Replication      Caching
-          │                │                │
-          ▼                ▼                ▼
-     Consistent         Quorum           Redis
-      Hashing           Reads/Writes
-          │                │
-          └────────┬───────┘
-                   ▼
-             Fault Tolerance
-                   │
-                   ▼
-             Rebalancing
-```
+- **Shards:** scale horizontally by adding shards at runtime
+- **Read throughput:** substantially higher with the Redis cache
+- **Storage overhead:** 3x due to RF=3
+- **Failure tolerance:** one shard can fail without data loss
 
 ---
 
-## 👨‍💻 Author
+## What I Learned
 
-**Bhuvan V**
-
-📧 Email: [bhuvanvachar0123@gmail.com](mailto:bhuvanvachar0123@gmail.com)
-
-🔗 LinkedIn: https://www.linkedin.com/in/bhuvan-v-188284246
+- **Framework defaults can hide bugs.** `open-in-view: true` seemed harmless until sharding exposed it.
+- **JPA entity identity matters.** Reusing one object across databases silently breaks inserts.
+- **Failure handling is most of the code.** The happy path is easy; partial failures, timeouts, and fallbacks are where the complexity lives.
+- **Consistency vs availability is real.** Quorum size, cache TTL, and sync vs async replication each trade one for the other.
+- **Idempotency makes recovery easy.** Backfill, rebalance, and cache eviction are all safe to retry.
+- **Observability pays off.** Logs and debug endpoints turned multi-hour bugs into short fixes.
 
 ---
 
-## ⭐ If You Find This Project Useful
+## Roadmap
 
-Feel free to explore the code, experiment with different replication factors and quorum configurations, and use the project as a learning resource for distributed systems and backend engineering.
+- [ ] Quorum reads with read repair (R=2, detect stale replicas)
+- [ ] Async replication (write to primary, replicate in background)
+- [ ] Circuit breaker for Redis (skip when down, recover automatically)
+- [ ] Prometheus metrics and Grafana dashboards
+- [ ] Anti-entropy repair job (Merkle trees)
+- [ ] Leader election for replica promotion (Raft)
+- [ ] Distributed transactions (saga pattern)
+- [ ] Kubernetes deployment manifests
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Language | Java 23 |
+| Framework | Spring Boot 4.1 |
+| ORM | Hibernate / Spring Data JPA |
+| Database | MySQL (4 shards) |
+| Cache | Redis 7 + Lettuce |
+| Serialization | Jackson 3 |
+| Hash Function | Murmur3 (Guava) |
+| IDs | ULID |
+| Build | Maven |
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE) for details.
+
+---
+
+## Acknowledgments
+
+Inspired by:
+
+- Amazon Dynamo paper (2007): consistent hashing and replication
+- Apache Cassandra: VNodes and tunable consistency
+- MongoDB: replica sets
+- Martin Kleppmann's *Designing Data-Intensive Applications*
+
+---
+
+## Contact
+
+**Author:** [Your Name]
+**Email:** [your.email@example.com]
+**LinkedIn:** [linkedin.com/in/yourprofile](https://linkedin.com/in/yourprofile)
