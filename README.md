@@ -226,6 +226,6 @@ Inspired by:
 
 ## Contact
 
-**Author:** [Bhuvan V]
-**Email:** [bhuvanvachar0123@gmail.com]
-**LinkedIn:** [https://www.linkedin.com/in/bhuvan-v-188284246](https://www.linkedin.com/in/bhuvan-v-188284246)
+- **Author:** [Bhuvan V]
+- **Email:** [bhuvanvachar0123@gmail.com]
+- **LinkedIn:** [https://www.linkedin.com/in/bhuvan-v-188284246](https://www.linkedin.com/in/bhuvan-v-188284246)
