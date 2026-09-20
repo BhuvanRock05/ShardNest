@@ -4,7 +4,6 @@
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1-brightgreen)
 ![MySQL](https://img.shields.io/badge/MySQL-Sharded-blue)
 ![Redis](https://img.shields.io/badge/Redis-Cache-red)
-![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
 A sharded database layer built from scratch in **Java / Spring Boot**. ShardNest implements **consistent hashing**, **RF=3 replication**, **quorum writes**, **live rebalancing**, and **Redis caching**, the same core ideas behind systems like Cassandra, DynamoDB, and MongoDB.
 
@@ -66,19 +65,13 @@ If each shard sits at a single position on the ring, distribution is badly skewe
 - Writes go to all replicas in parallel and succeed once **W=2** acknowledge, which is faster than waiting for all 3 while still surviving a single failure.
 - Reads currently fall back across replicas. Quorum reads with read repair (R=2, so W+R > N) are on the roadmap for stronger consistency guarantees.
 
-### 5. `open-in-view: false`
-
-*The hardest bug in the project.* Spring's default `open-in-view: true` keeps the JPA `EntityManager` open for the entire HTTP request. Combined with `AbstractRoutingDataSource`, the datasource is chosen when the first query runs and reused afterward, so changing `ShardContext` mid-request has no effect and writes silently land on the wrong shard.
-
-**Fix:** disable open-in-view and use `TransactionTemplate` (instead of `@Transactional`) so `ShardContext` is set **before** the transaction opens.
-
-### 6. `saveAndFlush` and Fresh Entity Copies
+### 5. `saveAndFlush` and Fresh Entity Copies
 
 `save()` calls `merge()` for entities with a preset ID, so if the same object is already in the persistence context Hibernate issues an `UPDATE` instead of an `INSERT`.
 
 **Fix:** use `saveAndFlush()` and always write a **fresh copy** of the entity per shard, never reusing one object across shards.
 
-### 7. Cache-Aside over Write-Through
+### 6. Cache-Aside over Write-Through
 
 - **Read:** check cache, and on a miss read the DB, populate the cache, and return.
 - **Write:** write to the DB, then delete the cache entry so the next read repopulates it.
@@ -220,12 +213,6 @@ Approximate figures from local development runs:
 
 ---
 
-## License
-
-MIT. See [LICENSE](LICENSE) for details.
-
----
-
 ## Acknowledgments
 
 Inspired by:
@@ -239,6 +226,6 @@ Inspired by:
 
 ## Contact
 
-**Author:** [Your Name]
-**Email:** [your.email@example.com]
-**LinkedIn:** [linkedin.com/in/yourprofile](https://linkedin.com/in/yourprofile)
+**Author:** [Bhuvan V]
+**Email:** [bhuvanvachar0123@gmail.com]
+**LinkedIn:** [https://www.linkedin.com/in/bhuvan-v-188284246](https://www.linkedin.com/in/bhuvan-v-188284246)
